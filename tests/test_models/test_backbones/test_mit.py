@@ -120,3 +120,4 @@ def test_mit_init():
     # init_cfg=123, whose type is unsupported
     with pytest.raises(AssertionError):
         MixVisionTransformer(pretrained=123, init_cfg=123)
+        
