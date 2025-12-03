@@ -118,3 +118,4 @@ mmseg/.mim
 
 # Pytorch
 *.pth
+checkpoints/mit_b2_20220624-66e8bf70.pth:Zone.Identifier

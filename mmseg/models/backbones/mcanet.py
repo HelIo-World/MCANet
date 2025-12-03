@@ -6,6 +6,7 @@ import torch.nn as nn
 from mmengine.model import BaseModule
 from mmengine.utils.dl_utils.parrots_wrapper import _BatchNorm
 
+from mmseg.models.utils.up_conv_block import UpConvBlock
 from mmseg.registry import MODELS
 from ..utils import resize
 from .mit import MixVisionTransformer
@@ -42,7 +43,7 @@ class AttentionBlock(nn.Module):
                  out_channels, return_attn_map, share_key_query, query_downsample,
                  key_downsample, key_query_num_convs, value_out_num_convs,
                  key_query_norm, value_out_norm, matmul_norm, with_out,
-                 conv_cfg, norm_cfg, act_cfg):
+                 conv_cfg, norm_cfg, act_cfg,sr=1):
         super().__init__()
         if share_key_query:
             assert key_in_channels == query_in_channels
@@ -93,9 +94,15 @@ class AttentionBlock(nn.Module):
                 act_cfg=act_cfg)
         else:
             self.out_project = None
-
         self.query_downsample = query_downsample
         self.key_downsample = key_downsample
+        if key_downsample is None and sr > 1:
+            self.key_downsample = nn.Conv2d(
+                in_channels=key_in_channels,
+                out_channels=key_in_channels,
+                kernel_size=sr,
+                stride=sr
+            )
         self.matmul_norm = matmul_norm
 
         self.init_weights()
@@ -348,6 +355,9 @@ class MCANet(BaseModule):
     def __init__(self,
                  num_stages=4,
                  return_attn_map=True,
+                 global_intra_attn_flag=True,
+                 local_inter_attn_flag=True,
+                 multi_scale_cross_attn_flag=True,
                  dec_num_convs=(2, 2, 2, 2),
                  downsamples=(True, True, True, True),
                  dec_dilations=(1, 1, 1, 1),
@@ -386,13 +396,16 @@ class MCANet(BaseModule):
         self.norm_eval = norm_eval
         self.encoder_channels = encoder_channels
         self.return_attn_map = return_attn_map
+        self.global_intra_attn_flag = global_intra_attn_flag
+        self.local_inter_attn_flag = local_inter_attn_flag
+        self.multi_scale_cross_attn_flag = multi_scale_cross_attn_flag
 
-        # mit-b5
+        # mit-b2
         self.encoder = MixVisionTransformer(
             in_channels=3,
             embed_dims=64,
             num_stages=4,
-            num_layers=[3, 6, 40, 3],
+            num_layers=[3, 4, 6, 3],
             num_heads=[1, 2, 5, 8],
             patch_sizes=[7, 3, 3, 3],
             sr_ratios=[8, 4, 2, 1],
@@ -402,143 +415,160 @@ class MCANet(BaseModule):
             drop_rate=0.0,
             attn_drop_rate=0.0,
             drop_path_rate=0.1,
-            pretrained='checkpoints/segformer_b5_backbone_weights.pth'
+            pretrained='checkpoints/mit_b2_20220624-66e8bf70.pth'
         )
-        
-        self.skip_input_proj = nn.ModuleList()
-        self.skip_output_proj = nn.ModuleList()
-        self.skip_output_conv = nn.ModuleList()
-        self.global_intra_attn_blocks = nn.ModuleList()
-        self.cross_attn_g = nn.ModuleList()
-        self.cross_attn_l = nn.ModuleList()
-        self.local_inter_attn_block = AttentionBlock(
-                    key_in_channels=encoder_channels[0] * num_stages,
-                    query_in_channels=encoder_channels[0] * num_stages,
-                    channels=encoder_channels[0] * num_stages,
-                    out_channels=encoder_channels[0] * num_stages,
-                    return_attn_map=return_attn_map,
-                    share_key_query=False,
-                    query_downsample=None,
-                    key_downsample=None,
-                    key_query_num_convs=1,
-                    value_out_num_convs=1,
-                    key_query_norm=True,
-                    value_out_norm=True,
-                    matmul_norm=False,
-                    with_out=False,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
-                )
-        
-        for i in range(num_stages):
-            self.skip_input_proj.append(
-                ConvModule(
-                    in_channels=encoder_channels[i],
-                    out_channels=encoder_channels[0],
-                    kernel_size=1,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
-                )
-            )
-            self.skip_output_proj.append(
-                ConvModule(
-                    in_channels=encoder_channels[0] * num_stages,
-                    out_channels=encoder_channels[i],
-                    kernel_size=1,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
-                )
-            )
-            self.skip_output_conv.append(
-                ConvModule(
-                    in_channels=encoder_channels[i],
-                    out_channels=encoder_channels[i],
-                    kernel_size=1,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
-                )
-            )
 
+        if self.local_inter_attn_flag:
+            self.skip_input_proj = nn.ModuleList([
+                ConvModule(
+                        in_channels=encoder_channels[i],
+                        out_channels=encoder_channels[0],
+                        kernel_size=1,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                ) for i in range(num_stages)
+            ])
+            self.skip_output_proj = nn.ModuleList([
+                ConvModule(
+                        in_channels=encoder_channels[0] * num_stages,
+                        out_channels=encoder_channels[i],
+                        kernel_size=1,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                ) for i in range(num_stages)]
+            )
+            self.skip_output_conv = nn.ModuleList([
+                ConvModule(
+                        in_channels=encoder_channels[i],
+                        out_channels=encoder_channels[i],
+                        kernel_size=1,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                ) for i in range(num_stages)
+            ])
+            self.local_inter_attn_block = AttentionBlock(
+                        key_in_channels=encoder_channels[0] * num_stages,
+                        query_in_channels=encoder_channels[0] * num_stages,
+                        channels=encoder_channels[0] * num_stages,
+                        out_channels=encoder_channels[0] * num_stages,
+                        return_attn_map=return_attn_map,
+                        share_key_query=False,
+                        query_downsample=None,
+                        key_downsample=None,
+                        key_query_num_convs=1,
+                        value_out_num_convs=1,
+                        key_query_norm=True,
+                        value_out_norm=True,
+                        matmul_norm=True,
+                        with_out=False,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                    )
+        
         self.decoder = nn.ModuleList()
-
-        for i in range(1,num_stages):
-            self.global_intra_attn_blocks.append(
-                AttentionBlock(
-                    key_in_channels=encoder_channels[i],
-                    query_in_channels=encoder_channels[i],
-                    channels=encoder_channels[i],
-                    out_channels=encoder_channels[i],
-                    return_attn_map=return_attn_map,
-                    share_key_query=False,
-                    query_downsample=None,
-                    key_downsample=None,
-                    key_query_num_convs=1,
-                    value_out_num_convs=1,
-                    key_query_norm=True,
-                    value_out_norm=True,
-                    matmul_norm=False,
-                    with_out=False,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
+        
+        if multi_scale_cross_attn_flag:
+            self.global_intra_attn_blocks = nn.ModuleList()
+            self.cross_attn_g = nn.ModuleList()
+            self.cross_attn_l = nn.ModuleList()
+            for i in range(1,num_stages):
+                self.global_intra_attn_blocks.append(
+                    AttentionBlock(
+                        key_in_channels=encoder_channels[i],
+                        query_in_channels=encoder_channels[i],
+                        channels=encoder_channels[i],
+                        out_channels=encoder_channels[i],
+                        return_attn_map=return_attn_map,
+                        sr=2 ** (num_stages - i - 1),
+                        share_key_query=False,
+                        query_downsample=None,
+                        key_downsample=None,
+                        key_query_num_convs=1,
+                        value_out_num_convs=1,
+                        key_query_norm=True,
+                        value_out_norm=True,
+                        matmul_norm=True,
+                        with_out=False,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                    )
                 )
-            )
-            self.cross_attn_l.append(
-                AttentionBlock(
-                    key_in_channels=encoder_channels[i - 1],
-                    query_in_channels=encoder_channels[i - 1],
-                    channels=encoder_channels[i - 1],
-                    out_channels=encoder_channels[i - 1],
-                    return_attn_map=False,
-                    share_key_query=False,
-                    query_downsample=None,
-                    key_downsample=None,
-                    key_query_num_convs=1,
-                    value_out_num_convs=1,
-                    key_query_norm=True,
-                    value_out_norm=True,
-                    matmul_norm=False,
-                    with_out=False,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
+                self.cross_attn_l.append(
+                    AttentionBlock(
+                        key_in_channels=encoder_channels[i - 1],
+                        query_in_channels=encoder_channels[i - 1],
+                        channels=encoder_channels[i - 1],
+                        out_channels=encoder_channels[i - 1],
+                        return_attn_map=False,
+                        sr=2 ** (num_stages - i),
+                        share_key_query=False,
+                        query_downsample=None,
+                        key_downsample=None,
+                        key_query_num_convs=1,
+                        value_out_num_convs=1,
+                        key_query_norm=True,
+                        value_out_norm=True,
+                        matmul_norm=True,
+                        with_out=False,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                    )
                 )
-            )
-            self.cross_attn_g.append(
-                AttentionBlock(
-                    key_in_channels=encoder_channels[i - 1],
-                    query_in_channels=encoder_channels[i - 1],
-                    channels=encoder_channels[i - 1],
-                    out_channels=encoder_channels[i - 1],
-                    return_attn_map=False,
-                    share_key_query=False,
-                    query_downsample=None,
-                    key_downsample=None,
-                    key_query_num_convs=1,
-                    value_out_num_convs=1,
-                    key_query_norm=True,
-                    value_out_norm=True,
-                    matmul_norm=False,
-                    with_out=False,
-                    conv_cfg=conv_cfg,
-                    norm_cfg=norm_cfg,
-                    act_cfg=act_cfg
+                self.cross_attn_g.append(
+                    AttentionBlock(
+                        key_in_channels=encoder_channels[i - 1],
+                        query_in_channels=encoder_channels[i - 1],
+                        channels=encoder_channels[i - 1],
+                        out_channels=encoder_channels[i - 1],
+                        return_attn_map=False,
+                        sr=2 ** (num_stages - i),
+                        share_key_query=False,
+                        query_downsample=None,
+                        key_downsample=None,
+                        key_query_num_convs=1,
+                        value_out_num_convs=1,
+                        key_query_norm=True,
+                        value_out_norm=True,
+                        matmul_norm=True,
+                        with_out=False,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg
+                    )
                 )
-            )
+                self.decoder.append(
+                    MultiScaleCrossAttentionBlock(
+                        conv_block=BasicConvBlock,
+                        in_channels=encoder_channels[i],
+                        xl_channels=encoder_channels[i - 1],
+                        out_channels=encoder_channels[i - 1],
+                        global_intra_attn=self.global_intra_attn_blocks[i - 1],
+                        return_attn_map=return_attn_map,
+                        cross_attn_g=self.cross_attn_g[i - 1],
+                        cross_attn_l=self.cross_attn_l[i - 1],
+                        num_convs=dec_num_convs[i - 1],
+                        stride=1,
+                        dilation=dec_dilations[i - 1],
+                        with_cp=with_cp,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg,
+                        upsample_cfg=upsample_cfg
+                        )
+                    )
+        else:
             self.decoder.append(
-                MultiScaleCrossAttentionBlock(
+                UpConvBlock(
                     conv_block=BasicConvBlock,
                     in_channels=encoder_channels[i],
-                    xl_channels=encoder_channels[i - 1],
+                    skip_channels=encoder_channels[i - 1],
                     out_channels=encoder_channels[i - 1],
-                    global_intra_attn=self.global_intra_attn_blocks[i - 1],
-                    return_attn_map=return_attn_map,
-                    cross_attn_g=self.cross_attn_g[i - 1],
-                    cross_attn_l=self.cross_attn_l[i - 1],
                     num_convs=dec_num_convs[i - 1],
                     stride=1,
                     dilation=dec_dilations[i - 1],
@@ -547,9 +577,24 @@ class MCANet(BaseModule):
                     norm_cfg=norm_cfg,
                     act_cfg=act_cfg,
                     upsample_cfg=upsample_cfg
-                    )
                 )
+            )
 
+
+
+    def local_inter_attntion(self,enc_out):
+        enc_rs = [resize(enc_out[i],(64,32),mode='bilinear') for i in range(self.num_stages)]
+        enc_proj = [self.skip_input_proj[i](enc_rs[i]) for i in range(self.num_stages)]
+        enc_cat = torch.cat(enc_proj,dim=1)
+        l,local_inter_attn_maps = None,None
+        if self.return_attn_map:
+            l,local_inter_attn_maps = self.local_inter_attn_block(enc_cat,enc_cat)
+        else:
+            l = self.local_inter_attn_block(enc_cat,enc_cat)
+        skip_out_proj = [self.skip_output_proj[i](l) for i in range(self.num_stages)]
+        skip_out_rs = [resize(skip_out_proj[i],size=enc_out[i].shape[-2:]) for i in range(self.num_stages)]
+        skip_out = [self.skip_output_conv[i](skip_out_rs[i]) for i in range(self.num_stages)]
+        return skip_out,local_inter_attn_maps
 
 
     def forward(self, x):
@@ -558,30 +603,21 @@ class MCANet(BaseModule):
         dec_out = [enc_out[-1]]
         x = enc_out[-1]
         global_intra_attn_maps = []
-        enc_rs = [resize(enc_out[i],(64,32),mode='bilinear') for i in range(self.num_stages)]
-        enc_proj = [self.skip_input_proj[i](enc_rs[i]) for i in range(self.num_stages)]
-        enc_cat = torch.cat(enc_proj,dim=1)
+        local_inter_attn_maps = None
 
-        l,local_attn_maps = None,None
-        if self.return_attn_map:
-            l,local_attn_maps = self.local_inter_attn_block(enc_cat,enc_cat)
-        else:
-            l = self.local_inter_attn_block(enc_cat,enc_cat)
-
-        skip_out_proj = [self.skip_output_proj[i](l) for i in range(self.num_stages)]
-        skip_out_rs = [resize(skip_out_proj[i],size=enc_out[i].shape[-2:]) for i in range(self.num_stages)]
-        skip_out = [self.skip_output_conv[i](skip_out_rs[i]) for i in range(self.num_stages)]
+        if self.local_inter_attn_flag:
+            enc_out,local_inter_attn_maps = self.local_inter_attntion(enc_out)
 
         for i in reversed(range(len(self.decoder))):
             if self.return_attn_map:
-                x,global_attn_map = self.decoder[i](skip_out[i], x)
+                x,global_attn_map = self.decoder[i](enc_out[i], x)
                 global_intra_attn_maps.append(global_attn_map)
             else:
-                x = self.decoder[i](skip_out[i],x)
+                x = self.decoder[i](enc_out[i],x)
             dec_out.append(x)
 
         if self.return_attn_map:
-            return dec_out,local_attn_maps,global_intra_attn_maps
+            return dec_out,local_inter_attn_maps,global_intra_attn_maps
         return dec_out
 
     def train(self, mode=True):
