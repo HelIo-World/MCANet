@@ -1,8 +1,8 @@
 # model settings
 norm_cfg = dict(type='SyncBN', requires_grad=True)
 
-global_intra_attn_flag = True
-local_inter_attn_flag = True
+global_intra_attn_flag = False
+local_inter_attn_flag = False
 
 data_preprocessor = dict(
     type='SegDataPreProcessor',
