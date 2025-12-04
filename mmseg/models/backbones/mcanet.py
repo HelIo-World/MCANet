@@ -8,7 +8,7 @@ from mmengine.utils.dl_utils.parrots_wrapper import _BatchNorm
 
 from mmseg.models.utils.up_conv_block import UpConvBlock
 from mmseg.registry import MODELS
-from ..utils import resize
+from ..utils import resize,LayerNorm2d
 from .mit import MixVisionTransformer
 from .unet import BasicConvBlock
 from mmcv.cnn import ConvModule,build_upsample_layer
@@ -242,6 +242,10 @@ class MultiScaleCrossAttentionBlock(nn.Module):
                  upsample_cfg=dict(type='InterpConv')):
         super().__init__()
 
+        self.ln_xl = nn.LayerNo(xl_channels)
+        self.ln_x = LayerNorm2d(in_channels)
+        self.ln_xg = None if global_intra_attn is None else LayerNorm2d(in_channels)
+        self.ln_out = LayerNorm2d(out_channels)
         self.global_intra_attn = global_intra_attn
         self.cross_attn_g = cross_attn_g
         self.cross_attn_l = cross_attn_l
@@ -284,17 +288,24 @@ class MultiScaleCrossAttentionBlock(nn.Module):
 
     def forward(self, xl, x):
         """Forward function."""
+        xl = self.ln_xl(xl)
+        x = self.ln_x(x)
         xg,attn_maps = None,None
-        if self.return_attn_map:
-            xg,attn_maps = self.global_intra_attn(x,x)
+        if self.global_intra_attn:
+            if self.return_attn_map:
+                xg,attn_maps = self.global_intra_attn(x,x)
+            else:
+                xg = self.global_intra_attn(x,x)
+            xg = self.ln_xg(xg)
         else:
-            xg = self.global_intra_attn(x,x)
+            xg = x
         xg = self.upsample(xg)
         xf = self.cross_attn_g(xl,xg) + self.cross_attn_l(xg,xl)
         g = self.ag(xg,xl)
         xm = self.proj_xm(torch.cat([g * xg,(1 - g) * xl],dim=1))
         out = torch.cat([xf, xm], dim=1)
         out = self.conv_block(out)
+        out = self.ln_out(out)
 
         if self.return_attn_map:
             return out,attn_maps
@@ -400,7 +411,7 @@ class MCANet(BaseModule):
         self.local_inter_attn_flag = local_inter_attn_flag
         self.multi_scale_cross_attn_flag = multi_scale_cross_attn_flag
 
-        # mit-b2
+        # mit-b5
         self.encoder = MixVisionTransformer(
             in_channels=3,
             embed_dims=64,
@@ -420,13 +431,16 @@ class MCANet(BaseModule):
 
         if self.local_inter_attn_flag:
             self.skip_input_proj = nn.ModuleList([
-                ConvModule(
-                        in_channels=encoder_channels[i],
-                        out_channels=encoder_channels[0],
-                        kernel_size=1,
-                        conv_cfg=conv_cfg,
-                        norm_cfg=norm_cfg,
-                        act_cfg=act_cfg
+                nn.Sequential(
+                    LayerNorm2d(encoder_channels[i]),
+                    ConvModule(
+                            in_channels=encoder_channels[i],
+                            out_channels=encoder_channels[0],
+                            kernel_size=1,
+                            conv_cfg=conv_cfg,
+                            norm_cfg=norm_cfg,
+                            act_cfg=act_cfg
+                    )
                 ) for i in range(num_stages)
             ])
             self.skip_output_proj = nn.ModuleList([
@@ -472,32 +486,35 @@ class MCANet(BaseModule):
         self.decoder = nn.ModuleList()
         
         if multi_scale_cross_attn_flag:
-            self.global_intra_attn_blocks = nn.ModuleList()
+            self.global_intra_attn_blocks = None
+            if self.global_intra_attn_flag:
+                self.global_intra_attn_blocks = nn.ModuleList()
             self.cross_attn_g = nn.ModuleList()
             self.cross_attn_l = nn.ModuleList()
             for i in range(1,num_stages):
-                self.global_intra_attn_blocks.append(
-                    AttentionBlock(
-                        key_in_channels=encoder_channels[i],
-                        query_in_channels=encoder_channels[i],
-                        channels=encoder_channels[i],
-                        out_channels=encoder_channels[i],
-                        return_attn_map=return_attn_map,
-                        sr=2 ** (num_stages - i - 1),
-                        share_key_query=False,
-                        query_downsample=None,
-                        key_downsample=None,
-                        key_query_num_convs=1,
-                        value_out_num_convs=1,
-                        key_query_norm=True,
-                        value_out_norm=True,
-                        matmul_norm=True,
-                        with_out=False,
-                        conv_cfg=conv_cfg,
-                        norm_cfg=norm_cfg,
-                        act_cfg=act_cfg
+                if self.global_intra_attn_flag:
+                    self.global_intra_attn_blocks.append(
+                        AttentionBlock(
+                            key_in_channels=encoder_channels[i],
+                            query_in_channels=encoder_channels[i],
+                            channels=encoder_channels[i],
+                            out_channels=encoder_channels[i],
+                            return_attn_map=return_attn_map,
+                            sr=2 ** (num_stages - i - 1),
+                            share_key_query=False,
+                            query_downsample=None,
+                            key_downsample=None,
+                            key_query_num_convs=1,
+                            value_out_num_convs=1,
+                            key_query_norm=True,
+                            value_out_norm=True,
+                            matmul_norm=True,
+                            with_out=False,
+                            conv_cfg=conv_cfg,
+                            norm_cfg=norm_cfg,
+                            act_cfg=act_cfg
+                        )
                     )
-                )
                 self.cross_attn_l.append(
                     AttentionBlock(
                         key_in_channels=encoder_channels[i - 1],
