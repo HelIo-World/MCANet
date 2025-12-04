@@ -487,6 +487,14 @@ def hsidrive_palette():
             [0, 0, 255], [102, 51, 0], [255, 255, 0], [0, 207, 250],
             [255, 166, 0], [0, 204, 204]]
 
+def mars_scapes_classes():
+    return [
+        'soil', 'bedrock', 'gravel', 'sand', 'big rock', 'steep slope', 'sky', 'unknown'
+    ]
+
+def mars_scapes_palette():
+    [[0, 0, 255], [0, 255, 0], [255, 0, 0], [255, 0, 255],
+               [255, 255, 0], [0, 255, 255], [34, 56, 19], [170, 85, 0]]
 
 dataset_aliases = {
     'cityscapes': ['cityscapes'],
@@ -510,7 +518,8 @@ dataset_aliases = {
     'hsidrive': [
         'hsidrive', 'HSIDrive', 'HSI-Drive', 'hsidrive20', 'HSIDrive20',
         'HSI-Drive20'
-    ]
+    ],
+    'mars_scapes':['mars_scapes']
 }
 
 

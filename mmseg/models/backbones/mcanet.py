@@ -405,7 +405,7 @@ class MCANet(BaseModule):
             in_channels=3,
             embed_dims=64,
             num_stages=4,
-            num_layers=[3, 4, 6, 3],
+            num_layers=[3, 6, 40, 3],
             num_heads=[1, 2, 5, 8],
             patch_sizes=[7, 3, 3, 3],
             sr_ratios=[8, 4, 2, 1],
@@ -415,7 +415,7 @@ class MCANet(BaseModule):
             drop_rate=0.0,
             attn_drop_rate=0.0,
             drop_path_rate=0.1,
-            pretrained='checkpoints/mit_b2_20220624-66e8bf70.pth'
+            pretrained='checkpoints/mit_b5_20220624-658746d9.pth'
         )
 
         if self.local_inter_attn_flag:
